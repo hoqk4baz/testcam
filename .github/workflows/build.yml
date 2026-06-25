@@ -1,0 +1,51 @@
+name: Build CameraDiscovery Dylib
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Build dylib
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          CC=$(xcrun --sdk iphoneos --find clang)
+
+          $CC \
+            -arch arm64 \
+            -isysroot $SDK \
+            -miphoneos-version-min=14.0 \
+            -fmodules \
+            -fobjc-arc \
+            -O0 \
+            -dynamiclib \
+            -framework UIKit \
+            -framework AVFoundation \
+            -framework CoreMedia \
+            -framework CoreVideo \
+            -lobjc \
+            -o CameraDiscovery.dylib \
+            CameraDiscovery.m
+
+          echo "✅ Build OK"
+          file CameraDiscovery.dylib
+          otool -L CameraDiscovery.dylib
+
+      - name: Ad-hoc sign
+        run: codesign -f -s - CameraDiscovery.dylib
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CameraDiscovery-dylib
+          path: CameraDiscovery.dylib
