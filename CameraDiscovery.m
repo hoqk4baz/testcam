@@ -7,7 +7,7 @@
 // ─────────────────────────────────────────────
 @interface CDLogWindow : UIWindow
 @property (nonatomic, strong) UITextView   *textView;
-@property (nonatomic, strong) UIButton     *copyBtn;
+@property (nonatomic, strong) UIButton     *pasteBtn;
 @property (nonatomic, strong) UIButton     *clearBtn;
 @property (nonatomic, strong) UIButton     *closeBtn;
 @property (nonatomic, strong) UILabel      *titleLabel;
@@ -88,15 +88,15 @@
     [self addSubview:btnBar];
 
     // Panoya Kopyala butonu
-    self.copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.copyBtn.frame = CGRectMake(8, 6, 140, 32);
-    [self.copyBtn setTitle:@"📋 Panoya Kopyala" forState:UIControlStateNormal];
-    [self.copyBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    self.copyBtn.titleLabel.font = [UIFont boldSystemFontOfSize:11];
-    self.copyBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.5 blue:1 alpha:0.8];
-    self.copyBtn.layer.cornerRadius = 8;
-    [self.copyBtn addTarget:self action:@selector(copyLogs) forControlEvents:UIControlEventTouchUpInside];
-    [btnBar addSubview:self.copyBtn];
+    self.pasteBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.pasteBtn.frame = CGRectMake(8, 6, 140, 32);
+    [self.pasteBtn setTitle:@"📋 Panoya Kopyala" forState:UIControlStateNormal];
+    [self.pasteBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    self.pasteBtn.titleLabel.font = [UIFont boldSystemFontOfSize:11];
+    self.pasteBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.5 blue:1 alpha:0.8];
+    self.pasteBtn.layer.cornerRadius = 8;
+    [self.pasteBtn addTarget:self action:@selector(copyLogs) forControlEvents:UIControlEventTouchUpInside];
+    [btnBar addSubview:self.pasteBtn];
 
     // Temizle butonu
     self.clearBtn = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -202,12 +202,12 @@ static CGRect _savedFrame;
     NSString *all = [self.lines componentsJoinedByString:@"\n"];
     [UIPasteboard generalPasteboard].string = all;
     // Görsel geri bildirim
-    NSString *orig = [self.copyBtn titleForState:UIControlStateNormal];
-    [self.copyBtn setTitle:@"✅ Kopyalandı!" forState:UIControlStateNormal];
-    self.copyBtn.backgroundColor = [UIColor colorWithRed:0.1 green:0.7 blue:0.3 alpha:0.9];
+    NSString *orig = [self.pasteBtn titleForState:UIControlStateNormal];
+    [self.pasteBtn setTitle:@"✅ Kopyalandı!" forState:UIControlStateNormal];
+    self.pasteBtn.backgroundColor = [UIColor colorWithRed:0.1 green:0.7 blue:0.3 alpha:0.9];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [self.copyBtn setTitle:orig forState:UIControlStateNormal];
-        self.copyBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.5 blue:1 alpha:0.8];
+        [self.pasteBtn setTitle:orig forState:UIControlStateNormal];
+        self.pasteBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.5 blue:1 alpha:0.8];
     });
 }
 
