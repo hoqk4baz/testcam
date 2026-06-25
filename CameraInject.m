@@ -155,6 +155,11 @@ static CIProxyDelegate *_proxy = nil;
 // ─────────────────────────────────────────────
 //  Video picker delegate (strong ref)
 // ─────────────────────────────────────────────
+@interface CIFloatBubble : NSObject
++ (void)show;
++ (void)updateState;
+@end
+
 @interface CIPickerDelegate : NSObject <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
 @end
 @implementation CIPickerDelegate
@@ -195,12 +200,6 @@ static UIViewController *topVC(void) {
 @property (nonatomic, strong) UIButton  *btn;
 @property (nonatomic, assign) CGPoint    touchOffset;  // dokunuş anındaki offset
 @property (nonatomic, assign) BOOL       dragging;
-@end
-
-// forward
-@interface CIFloatBubble : NSObject
-+ (void)show;
-+ (void)updateState;
 @end
 
 @implementation CIFloatWindow
