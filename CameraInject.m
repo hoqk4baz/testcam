@@ -161,6 +161,7 @@ static UIViewController *CITopVC(void) {
 //  Picker delegate
 // ─────────────────────────────────────────────
 @interface CIBubbleWindow : UIWindow
+@property (nonatomic, strong) UIButton *bubbleBtn;
 + (instancetype)shared;
 - (void)setInjecting:(BOOL)on;
 @end
@@ -220,12 +221,6 @@ static CIPanTarget *_panTarget = nil;
 //  Balon kaybolma sorunu: windowLevel çok yüksek +
 //  didBecomeVisible notification'da yeniden öne çek
 // ─────────────────────────────────────────────
-@interface CIBubbleWindow : UIWindow
-@property (nonatomic, strong) UIButton *btn;
-+ (instancetype)shared;
-- (void)setInjecting:(BOOL)on;
-@end
-
 @implementation CIBubbleWindow
 
 + (instancetype)shared {
@@ -260,19 +255,19 @@ static CIPanTarget *_panTarget = nil;
     self.rootViewController.view.backgroundColor = [UIColor clearColor];
 
     CGSize sz = [UIScreen mainScreen].bounds.size;
-    self.btn = [UIButton buttonWithType:UIButtonTypeCustom];
-    self.btn.frame = CGRectMake(sz.width - 70, 90, 56, 56);
-    self.btn.backgroundColor = [UIColor colorWithRed:.08 green:.08 blue:.1 alpha:.92];
-    self.btn.layer.cornerRadius  = 28;
-    self.btn.layer.borderWidth   = 1.5;
-    self.btn.layer.borderColor   = [UIColor colorWithWhite:1 alpha:.25].CGColor;
-    self.btn.layer.shadowColor   = [UIColor blackColor].CGColor;
-    self.btn.layer.shadowOpacity = .5;
-    self.btn.layer.shadowOffset  = CGSizeMake(0,3);
-    self.btn.layer.shadowRadius  = 8;
-    [self.btn setTitle:@"🎬" forState:UIControlStateNormal];
-    self.btn.titleLabel.font = [UIFont systemFontOfSize:26];
-    [self.btn addTarget:self action:@selector(tapped) forControlEvents:UIControlEventTouchUpInside];
+    self.bubbleBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    self.bubbleBtn.frame = CGRectMake(sz.width - 70, 90, 56, 56);
+    self.bubbleBtn.backgroundColor = [UIColor colorWithRed:.08 green:.08 blue:.1 alpha:.92];
+    self.bubbleBtn.layer.cornerRadius  = 28;
+    self.bubbleBtn.layer.borderWidth   = 1.5;
+    self.bubbleBtn.layer.borderColor   = [UIColor colorWithWhite:1 alpha:.25].CGColor;
+    self.bubbleBtn.layer.shadowColor   = [UIColor blackColor].CGColor;
+    self.bubbleBtn.layer.shadowOpacity = .5;
+    self.bubbleBtn.layer.shadowOffset  = CGSizeMake(0,3);
+    self.bubbleBtn.layer.shadowRadius  = 8;
+    [self.bubbleBtn setTitle:@"🎬" forState:UIControlStateNormal];
+    self.bubbleBtn.titleLabel.font = [UIFont systemFontOfSize:26];
+    [self.bubbleBtn addTarget:self action:@selector(tapped) forControlEvents:UIControlEventTouchUpInside];
 
     // Pan — butona ekliyoruz, superview = window.rootVC.view
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
@@ -280,9 +275,9 @@ static CIPanTarget *_panTarget = nil;
     pan.maximumNumberOfTouches = 1;
     pan.delaysTouchesBegan = NO;
     pan.delaysTouchesEnded = NO;
-    [self.btn addGestureRecognizer:pan];
+    [self.bubbleBtn addGestureRecognizer:pan];
 
-    [self.rootViewController.view addSubview:self.btn];
+    [self.rootViewController.view addSubview:self.bubbleBtn];
     [self makeKeyAndVisible];
 
     // Diğer window'lar öne geçtiğinde biz de öne geç
@@ -330,19 +325,19 @@ static CIPanTarget *_panTarget = nil;
 - (void)setInjecting:(BOOL)on {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (on) {
-            [self.btn setTitle:@"⏹" forState:UIControlStateNormal];
-            self.btn.backgroundColor = [UIColor colorWithRed:.75 green:.1 blue:.1 alpha:.92];
+            [self.bubbleBtn setTitle:@"⏹" forState:UIControlStateNormal];
+            self.bubbleBtn.backgroundColor = [UIColor colorWithRed:.75 green:.1 blue:.1 alpha:.92];
         } else {
-            [self.btn setTitle:@"🎬" forState:UIControlStateNormal];
-            self.btn.backgroundColor = [UIColor colorWithRed:.08 green:.08 blue:.1 alpha:.92];
+            [self.bubbleBtn setTitle:@"🎬" forState:UIControlStateNormal];
+            self.bubbleBtn.backgroundColor = [UIColor colorWithRed:.08 green:.08 blue:.1 alpha:.92];
         }
     });
 }
 
 // Sadece kendi butonuna hit-test, dışarısı app'e gitsin
 - (UIView *)hitTest:(CGPoint)p withEvent:(UIEvent *)e {
-    CGPoint bp = [self convertPoint:p toView:self.btn];
-    if (CGRectContainsPoint(self.btn.bounds, bp)) return self.btn;
+    CGPoint bp = [self convertPoint:p toView:self.bubbleBtn];
+    if (CGRectContainsPoint(self.bubbleBtn.bounds, bp)) return self.bubbleBtn;
     return nil;
 }
 
