@@ -160,6 +160,11 @@ static UIViewController *CITopVC(void) {
 // ─────────────────────────────────────────────
 //  Picker delegate
 // ─────────────────────────────────────────────
+@interface CIBubbleWindow : UIWindow
++ (instancetype)shared;
+- (void)setInjecting:(BOOL)on;
+@end
+
 @interface CIPickerDelegate : NSObject<UIImagePickerControllerDelegate,UINavigationControllerDelegate>
 @end
 @implementation CIPickerDelegate
