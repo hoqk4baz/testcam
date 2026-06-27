@@ -10,19 +10,29 @@ static id  _proxy           = nil;
 static id  _pickerDelegate  = nil;
 
 // ─────────────────────────────────────────────
-//  CIFrameInjector — dispatch_after tabanlı,
-//  thread bloke YOK
+//  Bubble window forward
+// ─────────────────────────────────────────────
+@interface CIBubbleWindow : UIWindow
+@property (nonatomic, strong) UIButton *bubbleBtn;
++ (instancetype)shared;
+- (void)setInjecting:(BOOL)on;
+- (void)log:(NSString *)msg;
+@end
+
+// ─────────────────────────────────────────────
+//  CIFrameInjector
 // ─────────────────────────────────────────────
 @interface CIFrameInjector : NSObject
 @property (nonatomic, strong) AVAsset                  *asset;
 @property (nonatomic, strong) AVAssetReader            *reader;
 @property (nonatomic, strong) AVAssetReaderTrackOutput *trackOut;
 @property (nonatomic, strong) dispatch_queue_t          q;
-@property (nonatomic, weak)   id<AVCaptureVideoDataOutputSampleBufferDelegate> realDelegate;
-@property (nonatomic, weak)   AVCaptureOutput          *capOut;
-@property (nonatomic, weak)   AVCaptureConnection      *conn;
+// strong tutuyoruz — weak olunca nil'e düşüyordu
+@property (nonatomic, strong) id<AVCaptureVideoDataOutputSampleBufferDelegate> realDelegate;
+@property (nonatomic, strong) AVCaptureOutput          *capOut;
+@property (nonatomic, strong) AVCaptureConnection      *conn;
 @property (nonatomic, assign) BOOL                      running;
-@property (nonatomic, assign) int64_t                   frameNs; // nanosaniye cinsinden frame süresi
+@property (nonatomic, assign) int64_t                   frameNs;
 - (void)startWithURL:(NSURL *)url;
 - (void)stop;
 @end
@@ -32,34 +42,27 @@ static id  _pickerDelegate  = nil;
 - (instancetype)init {
     self = [super init];
     _q = dispatch_queue_create("ci.inject", DISPATCH_QUEUE_SERIAL);
-    _frameNs = (int64_t)(NSEC_PER_SEC / 30); // 30 FPS default
+    _frameNs = (int64_t)(NSEC_PER_SEC / 30);
     return self;
 }
 
 - (BOOL)openReader {
-    if (self.reader) {
-        [self.reader cancelReading];
-        self.reader   = nil;
-        self.trackOut = nil;
-    }
+    [self.reader cancelReading];
+    self.reader = nil; self.trackOut = nil;
+
     AVAssetTrack *track = [self.asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
     if (!track) return NO;
 
     float fps = track.nominalFrameRate;
-    if (fps > 1 && fps < 120) {
-        self.frameNs = (int64_t)(NSEC_PER_SEC / fps);
-    }
+    if (fps > 1 && fps < 120) self.frameNs = (int64_t)(NSEC_PER_SEC / fps);
 
     NSError *err = nil;
     self.reader = [AVAssetReader assetReaderWithAsset:self.asset error:&err];
-    if (!self.reader) { NSLog(@"[CI] ❌ %@", err); return NO; }
+    if (!self.reader) return NO;
 
-    NSDictionary *settings = @{
-        (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA)
-    };
     self.trackOut = [AVAssetReaderTrackOutput
-                     assetReaderTrackOutputWithTrack:track
-                     outputSettings:settings];
+        assetReaderTrackOutputWithTrack:track
+        outputSettings:@{(id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)}];
     [self.reader addOutput:self.trackOut];
     return [self.reader startReading];
 }
@@ -67,9 +70,11 @@ static id  _pickerDelegate  = nil;
 - (void)startWithURL:(NSURL *)url {
     [self stop];
     self.asset = [AVAsset assetWithURL:url];
-    if (![self openReader]) { NSLog(@"[CI] ❌ reader açılamadı"); return; }
+    if (![self openReader]) {
+        [[CIBubbleWindow shared] log:@"❌ Reader açılamadı"]; return;
+    }
     self.running = YES;
-    NSLog(@"[CI] ▶ injection başladı (%.0f FPS)", (double)NSEC_PER_SEC / self.frameNs);
+    [[CIBubbleWindow shared] log:[NSString stringWithFormat:@"▶ injection başladı (%.0ffps)", (double)NSEC_PER_SEC/self.frameNs]];
     [self scheduleNext];
 }
 
@@ -84,21 +89,19 @@ static id  _pickerDelegate  = nil;
 - (void)sendFrame {
     if (!self.running) return;
 
-    // Delegate henüz hazır değilse bekle
-    if (!self.realDelegate || !self.capOut) {
-        [self scheduleNext]; return;
+    // capOut/conn henüz yok — bekle
+    if (!self.capOut || !self.conn || !self.realDelegate) {
+        [[CIBubbleWindow shared] log:@"⏳ capOut/conn bekleniyor..."];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC/10), self.q, ^{
+            [self sendFrame];
+        });
+        return;
     }
 
     CMSampleBufferRef sample = [self.trackOut copyNextSampleBuffer];
-
     if (!sample) {
-        // Video bitti → başa sar
-        NSLog(@"[CI] 🔄 rewind");
-        if ([self openReader]) {
-            [self scheduleNext];
-        } else {
-            NSLog(@"[CI] ❌ rewind başarısız");
-        }
+        [self openReader];
+        [self scheduleNext];
         return;
     }
 
@@ -115,20 +118,17 @@ static id  _pickerDelegate  = nil;
 - (void)stop {
     self.running = NO;
     [self.reader cancelReading];
-    self.reader   = nil;
-    self.trackOut = nil;
-    self.capOut   = nil;
-    self.conn     = nil;
-    NSLog(@"[CI] ⏹ durduruldu");
+    self.reader = nil; self.trackOut = nil;
+    self.capOut = nil; self.conn = nil;
 }
 
 @end
 
 // ─────────────────────────────────────────────
-//  Proxy delegate — kamera frame'lerini bloklar
+//  Proxy delegate
 // ─────────────────────────────────────────────
 @interface CIProxyDelegate : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
-@property (nonatomic, weak) id<AVCaptureVideoDataOutputSampleBufferDelegate> real;
+@property (nonatomic, strong) id<AVCaptureVideoDataOutputSampleBufferDelegate> real;
 @end
 
 @implementation CIProxyDelegate
@@ -136,9 +136,12 @@ static id  _pickerDelegate  = nil;
 didOutputSampleBuffer:(CMSampleBufferRef)b
        fromConnection:(AVCaptureConnection *)c {
     CIFrameInjector *inj = (CIFrameInjector *)_injector;
+
+    // capOut/conn'u her zaman güncelle
+    inj.capOut = o;
+    inj.conn   = c;
+
     if (inj.running) {
-        if (!inj.capOut) inj.capOut = o;
-        if (!inj.conn)   inj.conn   = c;
         return; // kamera frame'ini yut
     }
     if ([self.real respondsToSelector:_cmd])
@@ -164,7 +167,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)b
 - (void)ci_setSBD:(id<AVCaptureVideoDataOutputSampleBufferDelegate>)del
             queue:(dispatch_queue_t)q {
     if (del && ![del isKindOfClass:[CIProxyDelegate class]]) {
-        NSLog(@"[CI] 🔗 delegate: %@", NSStringFromClass([del class]));
+        [[CIBubbleWindow shared] log:[NSString stringWithFormat:@"🔗 delegate: %@", NSStringFromClass([del class])]];
         CIProxyDelegate *p = (CIProxyDelegate *)_proxy;
         p.real = del;
         ((CIFrameInjector *)_injector).realDelegate = del;
@@ -178,6 +181,54 @@ didOutputSampleBuffer:(CMSampleBufferRef)b
     dispatch_once(&t, ^{
         Method o = class_getInstanceMethod(self, @selector(setSampleBufferDelegate:queue:));
         Method s = class_getInstanceMethod(self, @selector(ci_setSBD:queue:));
+        if (o && s) method_exchangeImplementations(o, s);
+    });
+}
+@end
+
+// ─────────────────────────────────────────────
+//  AVCaptureSession hook — startRunning'i yakala
+//  ve o anda output/connection'ı al
+// ─────────────────────────────────────────────
+@interface AVCaptureSession (CI) @end
+@implementation AVCaptureSession (CI)
+- (void)ci_startRunning {
+    [self ci_startRunning];
+
+    CIFrameInjector *inj = (CIFrameInjector *)_injector;
+    if (!inj) return;
+
+    // Session'daki ilk VideoDataOutput'u bul
+    for (AVCaptureOutput *out in self.outputs) {
+        if ([out isKindOfClass:[AVCaptureVideoDataOutput class]]) {
+            AVCaptureVideoDataOutput *vdo = (AVCaptureVideoDataOutput *)out;
+            // Connection'ı al
+            AVCaptureConnection *conn = [vdo connectionWithMediaType:AVMediaTypeVideo];
+            if (conn) {
+                inj.capOut = out;
+                inj.conn   = conn;
+                [[CIBubbleWindow shared] log:[NSString stringWithFormat:
+                    @"✅ startRunning — capOut/conn hazır\ndelegate: %@",
+                    NSStringFromClass([vdo.sampleBufferDelegate class])]];
+            }
+            // realDelegate'i de güncelle
+            id del = vdo.sampleBufferDelegate;
+            if (del && ![del isKindOfClass:[CIProxyDelegate class]]) {
+                CIProxyDelegate *p = (CIProxyDelegate *)_proxy;
+                p.real = del;
+                inj.realDelegate = del;
+            } else if ([del isKindOfClass:[CIProxyDelegate class]]) {
+                inj.realDelegate = ((CIProxyDelegate *)del).real;
+            }
+            break;
+        }
+    }
+}
++ (void)load {
+    static dispatch_once_t t;
+    dispatch_once(&t, ^{
+        Method o = class_getInstanceMethod(self, @selector(startRunning));
+        Method s = class_getInstanceMethod(self, @selector(ci_startRunning));
         if (o && s) method_exchangeImplementations(o, s);
     });
 }
@@ -208,15 +259,6 @@ static UIViewController *CITopVC(void) {
 }
 
 // ─────────────────────────────────────────────
-//  Bubble window — forward decl
-// ─────────────────────────────────────────────
-@interface CIBubbleWindow : UIWindow
-@property (nonatomic, strong) UIButton *bubbleBtn;
-+ (instancetype)shared;
-- (void)setInjecting:(BOOL)on;
-@end
-
-// ─────────────────────────────────────────────
 //  Picker delegate
 // ─────────────────────────────────────────────
 @interface CIPickerDelegate : NSObject
@@ -226,7 +268,6 @@ static UIViewController *CITopVC(void) {
 - (void)imagePickerController:(UIImagePickerController *)p
 didFinishPickingMediaWithInfo:(NSDictionary *)info {
     NSURL *url = info[UIImagePickerControllerMediaURL];
-    NSLog(@"[CI] 🎬 seçildi: %@", url);
     [p dismissViewControllerAnimated:YES completion:^{
         if (url) [(CIFrameInjector *)_injector startWithURL:url];
         [[CIBubbleWindow shared] setInjecting:YES];
@@ -243,36 +284,32 @@ didFinishPickingMediaWithInfo:(NSDictionary *)info {
 @interface CIPanTarget : NSObject
 - (void)pan:(UIPanGestureRecognizer *)g;
 @end
-
-static CGPoint _panStart;
-static CGPoint _originStart;
-
+static CGPoint _panStart, _originStart;
 @implementation CIPanTarget
 - (void)pan:(UIPanGestureRecognizer *)g {
-    UIView *v  = g.view;
-    UIView *sv = v.superview;
+    UIView *v = g.view, *sv = v.superview;
     CGPoint loc = [g locationInView:sv];
     if (g.state == UIGestureRecognizerStateBegan) {
-        _panStart    = loc;
-        _originStart = v.frame.origin;
+        _panStart = loc; _originStart = v.frame.origin;
     } else if (g.state == UIGestureRecognizerStateChanged) {
         CGRect f = v.frame;
         f.origin.x = _originStart.x + (loc.x - _panStart.x);
         f.origin.y = _originStart.y + (loc.y - _panStart.y);
-        CGSize sc  = sv.bounds.size;
-        f.origin.x = MAX(4, MIN(sc.width  - f.size.width  - 4, f.origin.x));
-        f.origin.y = MAX(24,MIN(sc.height - f.size.height - 4, f.origin.y));
+        CGSize sc = sv.bounds.size;
+        f.origin.x = MAX(4, MIN(sc.width - f.size.width - 4, f.origin.x));
+        f.origin.y = MAX(24, MIN(sc.height - f.size.height - 4, f.origin.y));
         [UIView performWithoutAnimation:^{ v.frame = f; }];
     }
 }
 @end
-
 static CIPanTarget *_panTarget = nil;
 
 // ─────────────────────────────────────────────
 //  CIBubbleWindow
 // ─────────────────────────────────────────────
-@implementation CIBubbleWindow
+@implementation CIBubbleWindow {
+    UILabel *_logLabel;
+}
 
 + (instancetype)shared {
     static CIBubbleWindow *w;
@@ -295,39 +332,51 @@ static CIPanTarget *_panTarget = nil;
     }
     if (!self) return nil;
 
-    self.windowLevel      = UIWindowLevelAlert + 9999;
-    self.backgroundColor  = [UIColor clearColor];
+    self.windowLevel = UIWindowLevelAlert + 9999;
+    self.backgroundColor = [UIColor clearColor];
     self.rootViewController = [UIViewController new];
     self.rootViewController.view.backgroundColor = [UIColor clearColor];
 
     CGSize sz = [UIScreen mainScreen].bounds.size;
+
+    // Balon
     self.bubbleBtn = [UIButton buttonWithType:UIButtonTypeCustom];
     self.bubbleBtn.frame = CGRectMake(sz.width - 70, 90, 56, 56);
-    self.bubbleBtn.backgroundColor      = [UIColor colorWithRed:.08 green:.08 blue:.1 alpha:.92];
-    self.bubbleBtn.layer.cornerRadius   = 28;
-    self.bubbleBtn.layer.borderWidth    = 1.5;
-    self.bubbleBtn.layer.borderColor    = [UIColor colorWithWhite:1 alpha:.25].CGColor;
-    self.bubbleBtn.layer.shadowColor    = [UIColor blackColor].CGColor;
-    self.bubbleBtn.layer.shadowOpacity  = .5;
-    self.bubbleBtn.layer.shadowOffset   = CGSizeMake(0, 3);
-    self.bubbleBtn.layer.shadowRadius   = 8;
+    self.bubbleBtn.backgroundColor     = [UIColor colorWithRed:.08 green:.08 blue:.1 alpha:.92];
+    self.bubbleBtn.layer.cornerRadius  = 28;
+    self.bubbleBtn.layer.borderWidth   = 1.5;
+    self.bubbleBtn.layer.borderColor   = [UIColor colorWithWhite:1 alpha:.25].CGColor;
+    self.bubbleBtn.layer.shadowColor   = [UIColor blackColor].CGColor;
+    self.bubbleBtn.layer.shadowOpacity = .5;
+    self.bubbleBtn.layer.shadowOffset  = CGSizeMake(0,3);
+    self.bubbleBtn.layer.shadowRadius  = 8;
     [self.bubbleBtn setTitle:@"🎬" forState:UIControlStateNormal];
     self.bubbleBtn.titleLabel.font = [UIFont systemFontOfSize:26];
-    [self.bubbleBtn addTarget:self
-                       action:@selector(tapped)
+    [self.bubbleBtn addTarget:self action:@selector(tapped)
              forControlEvents:UIControlEventTouchUpInside];
 
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
         initWithTarget:_panTarget action:@selector(pan:)];
     pan.maximumNumberOfTouches = 1;
-    pan.delaysTouchesBegan     = NO;
-    pan.delaysTouchesEnded     = NO;
+    pan.delaysTouchesBegan = NO;
+    pan.delaysTouchesEnded = NO;
     [self.bubbleBtn addGestureRecognizer:pan];
 
+    // Küçük log etiketi (balonun altında)
+    _logLabel = [[UILabel alloc] initWithFrame:CGRectMake(sz.width-180, 150, 170, 60)];
+    _logLabel.numberOfLines   = 3;
+    _logLabel.font            = [UIFont systemFontOfSize:9];
+    _logLabel.textColor       = [UIColor colorWithRed:.2 green:1 blue:.4 alpha:1];
+    _logLabel.backgroundColor = [UIColor colorWithWhite:0 alpha:.65];
+    _logLabel.layer.cornerRadius = 6;
+    _logLabel.layer.masksToBounds = YES;
+    _logLabel.textAlignment   = NSTextAlignmentLeft;
+    _logLabel.text            = @"";
+
     [self.rootViewController.view addSubview:self.bubbleBtn];
+    [self.rootViewController.view addSubview:_logLabel];
     [self makeKeyAndVisible];
 
-    // Başka window öne geçtiğinde biz de öne geç
     [[NSNotificationCenter defaultCenter]
         addObserver:self selector:@selector(bringToFront)
         name:UIWindowDidBecomeVisibleNotification object:nil];
@@ -335,10 +384,16 @@ static CIPanTarget *_panTarget = nil;
     return self;
 }
 
+- (void)log:(NSString *)msg {
+    NSLog(@"[CI] %@", msg);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        _logLabel.text = msg;
+    });
+}
+
 - (void)bringToFront {
     dispatch_async(dispatch_get_main_queue(), ^{
         [self makeKeyAndVisible];
-        // Picker sunabilmek için app window'unu key yap
         for (UIWindow *w in [UIApplication sharedApplication].windows)
             if (w != self) { [w makeKeyWindow]; break; }
     });
@@ -347,12 +402,10 @@ static CIPanTarget *_panTarget = nil;
 - (void)tapped {
     CIFrameInjector *inj = (CIFrameInjector *)_injector;
     if (inj.running) {
-        [inj stop];
-        [self setInjecting:NO];
-        return;
+        [inj stop]; [self setInjecting:NO]; return;
     }
     UIViewController *vc = CITopVC();
-    if (!vc) { NSLog(@"[CI] ❌ VC bulunamadı"); return; }
+    if (!vc) { [self log:@"❌ VC bulunamadı"]; return; }
 
     UIImagePickerController *picker = [UIImagePickerController new];
     picker.sourceType   = UIImagePickerControllerSourceTypePhotoLibrary;
@@ -376,8 +429,11 @@ static CIPanTarget *_panTarget = nil;
 }
 
 - (UIView *)hitTest:(CGPoint)p withEvent:(UIEvent *)e {
-    CGPoint bp = [self convertPoint:p toView:self.bubbleBtn];
-    if (CGRectContainsPoint(self.bubbleBtn.bounds, bp)) return self.bubbleBtn;
+    for (UIView *sub in self.rootViewController.view.subviews) {
+        CGPoint lp = [sub convertPoint:p fromView:self];
+        if (!sub.hidden && CGRectContainsPoint(sub.bounds, lp))
+            return sub;
+    }
     return nil;
 }
 
@@ -388,13 +444,13 @@ static CIPanTarget *_panTarget = nil;
 // ─────────────────────────────────────────────
 __attribute__((constructor))
 static void CIInit(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2*NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         _injector       = [CIFrameInjector new];
         _proxy          = [CIProxyDelegate new];
         _pickerDelegate = [CIPickerDelegate new];
         _panTarget      = [CIPanTarget new];
         [CIBubbleWindow shared];
-        NSLog(@"[CI] ✅ CameraInject hazır");
+        NSLog(@"[CI] ✅ hazır");
     });
 }
