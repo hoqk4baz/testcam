@@ -34,6 +34,10 @@ static id  _pickerDelegate = nil;
     return self;
 }
 - (BOOL)buildReader {
+    [self.reader cancelReading];
+    self.reader = nil;
+    self.trackOut = nil;
+
     AVAssetTrack *track = [self.asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
     if (!track) return NO;
     float fps = track.nominalFrameRate;
@@ -44,7 +48,7 @@ static id  _pickerDelegate = nil;
     self.trackOut = [AVAssetReaderTrackOutput
         assetReaderTrackOutputWithTrack:track
         outputSettings:@{(id)kCVPixelBufferPixelFormatTypeKey:@(kCVPixelFormatType_32BGRA)}];
-    self.trackOut.supportsRandomAccess = YES;
+    self.trackOut.supportsRandomAccess = NO;
     [self.reader addOutput:self.trackOut];
     return [self.reader startReading];
 }
@@ -57,19 +61,35 @@ static id  _pickerDelegate = nil;
     dispatch_async(self.q, ^{ [self loop]; });
 }
 - (void)loop {
+    double sleepSecs = CMTimeGetSeconds(self.frameDur);
+    if (sleepSecs <= 0 || sleepSecs > 1) sleepSecs = 1.0/30.0;
+
     while (self.running) {
+        // Delegate henüz bağlanmadıysa bekle
         if (!self.realDelegate || !self.capOut) {
             [NSThread sleepForTimeInterval:0.05]; continue;
         }
+
         CMSampleBufferRef s = [self.trackOut copyNextSampleBuffer];
-        if (!s) { [self buildReader]; continue; }
+
+        if (!s) {
+            // Video bitti → başa sar
+            NSLog(@"[CI] 🔄 rewind");
+            BOOL ok = [self buildReader];
+            if (!ok) { [NSThread sleepForTimeInterval:0.1]; }
+            continue;
+        }
+
         if ([self.realDelegate respondsToSelector:
-             @selector(captureOutput:didOutputSampleBuffer:fromConnection:)])
+             @selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
             [self.realDelegate captureOutput:self.capOut
                        didOutputSampleBuffer:s
                               fromConnection:self.conn];
+        }
         CFRelease(s);
-        [NSThread sleepForTimeInterval:CMTimeGetSeconds(self.frameDur)];
+
+        // FPS hızında bekle — sleepSecs sabit, her frame'de hesaplanmıyor
+        [NSThread sleepForTimeInterval:sleepSecs];
     }
 }
 - (void)stop {
