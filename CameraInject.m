@@ -63,7 +63,7 @@ static CMSampleBufferRef CIRepackBuffer(CVPixelBufferRef srcPx,
         }
     }
 
-    // CVImageBuffer attachment'larını kopyala — CVBufferGetAttachment iOS 14 uyumlu
+    // CVImageBuffer attachment'larını kopyala (iOS 15+)
     CVImageBufferRef refPx = CMSampleBufferGetImageBuffer(refBuf);
     if (refPx) {
         CFStringRef keys[] = {
@@ -74,11 +74,8 @@ static CMSampleBufferRef CIRepackBuffer(CVPixelBufferRef srcPx,
         };
         for (int i = 0; i < 4; i++) {
             CVAttachmentMode mode = 0;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            CFTypeRef val = CVBufferGetAttachment(refPx, keys[i], &mode);
-#pragma clang diagnostic pop
-            if (val) CVBufferSetAttachment(srcPx, keys[i], val, mode);
+            CFTypeRef val = CVBufferCopyAttachment(refPx, keys[i], &mode);
+            if (val) { CVBufferSetAttachment(srcPx, keys[i], val, mode); CFRelease(val); }
         }
     }
 
@@ -127,7 +124,7 @@ static CMSampleBufferRef CIRepackBuffer(CVPixelBufferRef srcPx,
     self.reader = nil; self.trackOut = nil;
 
     // Her rewind'da asset'i URL'den yeniden yükle — güvenilir başa sarma
-    self.asset = [AVURLAsset assetWithURL:self.videoURL options:nil];
+    self.asset = [AVURLAsset URLAssetWithURL:self.videoURL options:nil];
 
     AVAssetTrack *track = [self.asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
     if (!track) return NO;
@@ -149,7 +146,7 @@ static CMSampleBufferRef CIRepackBuffer(CVPixelBufferRef srcPx,
 - (void)startWithURL:(NSURL *)url {
     [self stop];
     self.videoURL = url;
-    self.asset    = [AVURLAsset assetWithURL:url options:nil];
+    self.asset    = [AVURLAsset URLAssetWithURL:url options:nil];
     self.running  = YES;
     [[CIBubbleWindow shared] log:@"⏳ kamera frame bekleniyor..."];
 
