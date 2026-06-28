@@ -103,22 +103,29 @@ static CMSampleBufferRef CIRepackBuffer(CVPixelBufferRef srcPx,
     self.reader = [AVAssetReader assetReaderWithAsset:self.asset error:&err];
     if (!self.reader) return NO;
 
-    // Boyutu kamera buffer'ından al
-    CGSize targetSize = CGSizeMake(1280, 720); // fallback
+    // Kamera'nın piksel formatını ve boyutunu birebir al
+    OSType pixFmt = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+    CGSize targetSize = CGSizeMake(480, 640); // portrait fallback
     if (self.lastCamBuffer) {
         CVImageBufferRef camPx = CMSampleBufferGetImageBuffer(self.lastCamBuffer);
         if (camPx) {
+            pixFmt     = CVPixelBufferGetPixelFormatType(camPx);
             targetSize = CGSizeMake(CVPixelBufferGetWidth(camPx),
                                     CVPixelBufferGetHeight(camPx));
         }
     }
 
+    [[CIBubbleWindow shared] log:[NSString stringWithFormat:
+        @"fmt:%c%c%c%c\n%.0fx%.0f  %.0ffps",
+        (char)(pixFmt>>24),(char)(pixFmt>>16),(char)(pixFmt>>8),(char)pixFmt,
+        targetSize.width, targetSize.height, (double)NSEC_PER_SEC/self.frameNs]];
+
     self.trackOut = [AVAssetReaderTrackOutput
         assetReaderTrackOutputWithTrack:track
         outputSettings:@{
-            (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
-            (id)kCVPixelBufferWidthKey:  @(targetSize.width),
-            (id)kCVPixelBufferHeightKey: @(targetSize.height),
+            (id)kCVPixelBufferPixelFormatTypeKey: @(pixFmt),
+            (id)kCVPixelBufferWidthKey:           @(targetSize.width),
+            (id)kCVPixelBufferHeightKey:          @(targetSize.height),
         }];
     [self.reader addOutput:self.trackOut];
     return [self.reader startReading];
@@ -127,13 +134,24 @@ static CMSampleBufferRef CIRepackBuffer(CVPixelBufferRef srcPx,
 - (void)startWithURL:(NSURL *)url {
     [self stop];
     self.asset = [AVAsset assetWithURL:url];
-    if (![self openReader]) {
-        [[CIBubbleWindow shared] log:@"❌ Reader açılamadı"]; return;
-    }
-    self.running = YES;
-    [[CIBubbleWindow shared] log:[NSString stringWithFormat:
-        @"▶ injection başladı\n%.0f FPS", (double)NSEC_PER_SEC/self.frameNs]];
-    [self scheduleNext];
+    self.running = YES; // önce running=YES, proxy kamera frame'lerini beklemeye devam etsin
+    [[CIBubbleWindow shared] log:@"⏳ kamera formatı bekleniyor..."];
+
+    // İlk kamera buffer'ı gelene kadar bekle (max 3sn)
+    __weak typeof(self) w = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5*NSEC_PER_SEC)), self.q, ^{
+        int tries = 0;
+        while (!w.lastCamBuffer && tries < 60) {
+            [NSThread sleepForTimeInterval:0.05];
+            tries++;
+        }
+        if (![w openReader]) {
+            [[CIBubbleWindow shared] log:@"❌ Reader açılamadı"];
+            w.running = NO; return;
+        }
+        [[CIBubbleWindow shared] log:@"▶ injection başladı"];
+        [w scheduleNext];
+    });
 }
 
 - (void)scheduleNext {
