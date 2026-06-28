@@ -89,6 +89,7 @@ static CMSampleBufferRef CIRepackBuffer(CVPixelBufferRef srcPx,
 //  CIFrameInjector
 // ─────────────────────────────────────────────
 @interface CIFrameInjector : NSObject
+@property (nonatomic, strong) NSURL                    *videoURL;
 @property (nonatomic, strong) AVAsset                  *asset;
 @property (nonatomic, strong) AVAssetReader            *reader;
 @property (nonatomic, strong) AVAssetReaderTrackOutput *trackOut;
@@ -125,6 +126,9 @@ static CMSampleBufferRef CIRepackBuffer(CVPixelBufferRef srcPx,
     [self.reader cancelReading];
     self.reader = nil; self.trackOut = nil;
 
+    // Her rewind'da asset'i URL'den yeniden yükle — güvenilir başa sarma
+    self.asset = [AVURLAsset assetWithURL:self.videoURL options:nil];
+
     AVAssetTrack *track = [self.asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
     if (!track) return NO;
     float fps = track.nominalFrameRate;
@@ -134,43 +138,24 @@ static CMSampleBufferRef CIRepackBuffer(CVPixelBufferRef srcPx,
     self.reader = [AVAssetReader assetReaderWithAsset:self.asset error:&err];
     if (!self.reader) return NO;
 
-    // Kamera'nın piksel formatını ve boyutunu birebir al
-    OSType pixFmt = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
-    CGSize targetSize = CGSizeMake(480, 640); // portrait fallback
-    if (self.lastCamBuffer) {
-        CVImageBufferRef camPx = CMSampleBufferGetImageBuffer(self.lastCamBuffer);
-        if (camPx) {
-            pixFmt     = CVPixelBufferGetPixelFormatType(camPx);
-            targetSize = CGSizeMake(CVPixelBufferGetWidth(camPx),
-                                    CVPixelBufferGetHeight(camPx));
-        }
-    }
-
-    [[CIBubbleWindow shared] log:[NSString stringWithFormat:
-        @"fmt:%c%c%c%c\n%.0fx%.0f  %.0ffps",
-        (char)(pixFmt>>24),(char)(pixFmt>>16),(char)(pixFmt>>8),(char)pixFmt,
-        targetSize.width, targetSize.height, (double)NSEC_PER_SEC/self.frameNs]];
-
+    // Her zaman BGRA — CVPixelBuffer kopyası için en basit format
     self.trackOut = [AVAssetReaderTrackOutput
         assetReaderTrackOutputWithTrack:track
-        outputSettings:@{
-            (id)kCVPixelBufferPixelFormatTypeKey: @(pixFmt),
-            (id)kCVPixelBufferWidthKey:           @(targetSize.width),
-            (id)kCVPixelBufferHeightKey:          @(targetSize.height),
-        }];
+        outputSettings:@{(id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)}];
     [self.reader addOutput:self.trackOut];
     return [self.reader startReading];
 }
 
 - (void)startWithURL:(NSURL *)url {
     [self stop];
-    self.asset = [AVAsset assetWithURL:url];
-    self.running = YES; // önce running=YES, proxy kamera frame'lerini beklemeye devam etsin
-    [[CIBubbleWindow shared] log:@"⏳ kamera formatı bekleniyor..."];
+    self.videoURL = url;
+    self.asset    = [AVURLAsset assetWithURL:url options:nil];
+    self.running  = YES;
+    [[CIBubbleWindow shared] log:@"⏳ kamera frame bekleniyor..."];
 
-    // İlk kamera buffer'ı gelene kadar bekle (max 3sn)
     __weak typeof(self) w = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5*NSEC_PER_SEC)), self.q, ^{
+        // İlk kamera buffer gelene kadar bekle (max 3sn)
         int tries = 0;
         while (!w.lastCamBuffer && tries < 60) {
             [NSThread sleepForTimeInterval:0.05];
@@ -193,11 +178,70 @@ static CMSampleBufferRef CIRepackBuffer(CVPixelBufferRef srcPx,
     });
 }
 
+// Video BGRA pixel'lerini kamera YUV buffer'ına kopyala
+static void CICopyBGRAtoYUV(CVPixelBufferRef src, CVPixelBufferRef dst) {
+    size_t sw = CVPixelBufferGetWidth(src),  sh = CVPixelBufferGetHeight(src);
+    size_t dw = CVPixelBufferGetWidth(dst),  dh = CVPixelBufferGetHeight(dst);
+
+    CVPixelBufferLockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
+    CVPixelBufferLockBaseAddress(dst, 0);
+
+    uint8_t *bgra = (uint8_t *)CVPixelBufferGetBaseAddress(src);
+    size_t bgraStride = CVPixelBufferGetBytesPerRow(src);
+
+    OSType dstFmt = CVPixelBufferGetPixelFormatType(dst);
+
+    if (dstFmt == kCVPixelFormatType_32BGRA) {
+        // BGRA → BGRA direkt kopyala
+        uint8_t *d = (uint8_t *)CVPixelBufferGetBaseAddress(dst);
+        size_t dStride = CVPixelBufferGetBytesPerRow(dst);
+        size_t copyW = MIN(sw, dw) * 4;
+        size_t copyH = MIN(sh, dh);
+        for (size_t row = 0; row < copyH; row++)
+            memcpy(d + row*dStride, bgra + row*bgraStride, copyW);
+
+    } else {
+        // BGRA → YUV 420 (BiPlanar)
+        uint8_t *yPlane  = (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(dst, 0);
+        uint8_t *uvPlane = (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(dst, 1);
+        size_t yStride   = CVPixelBufferGetBytesPerRowOfPlane(dst, 0);
+        size_t uvStride  = CVPixelBufferGetBytesPerRowOfPlane(dst, 1);
+
+        size_t copyW = MIN(sw, dw);
+        size_t copyH = MIN(sh, dh);
+
+        for (size_t row = 0; row < copyH; row++) {
+            uint8_t *bgraRow = bgra + row * bgraStride;
+            uint8_t *yRow    = yPlane + row * yStride;
+            uint8_t *uvRow   = uvPlane + (row/2) * uvStride;
+
+            for (size_t col = 0; col < copyW; col++) {
+                uint8_t b = bgraRow[col*4+0];
+                uint8_t g = bgraRow[col*4+1];
+                uint8_t r = bgraRow[col*4+2];
+
+                // BT.601 full range
+                uint8_t Y  = (uint8_t)( 0.299f*r + 0.587f*g + 0.114f*b);
+                yRow[col]  = Y;
+
+                if (row % 2 == 0 && col % 2 == 0) {
+                    uint8_t Cb = (uint8_t)(128 - 0.168736f*r - 0.331264f*g + 0.5f*b);
+                    uint8_t Cr = (uint8_t)(128 + 0.5f*r - 0.418688f*g - 0.081312f*b);
+                    uvRow[col]   = Cb;  // NV12: Cb first
+                    uvRow[col+1] = Cr;
+                }
+            }
+        }
+    }
+
+    CVPixelBufferUnlockBaseAddress(dst, 0);
+    CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
+}
+
 - (void)sendFrame {
     if (!self.running) return;
 
     if (!self.capOut || !self.conn || !self.realDelegate || !self.lastCamBuffer) {
-        // Henüz hazır değil — kısa bekle
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC/20), self.q, ^{
             [self sendFrame];
         });
@@ -206,28 +250,30 @@ static CMSampleBufferRef CIRepackBuffer(CVPixelBufferRef srcPx,
 
     CMSampleBufferRef videoSample = [self.trackOut copyNextSampleBuffer];
     if (!videoSample) {
-        [self openReader];
-        [self scheduleNext];
+        // Video bitti → başa sar
+        [[CIBubbleWindow shared] log:@"🔄 rewind"];
+        if ([self openReader]) [self scheduleNext];
+        else [[CIBubbleWindow shared] log:@"❌ rewind başarısız"];
         return;
     }
 
-    // Pixel buffer'ı al
-    CVImageBufferRef px = CMSampleBufferGetImageBuffer(videoSample);
+    CVImageBufferRef videoPx = CMSampleBufferGetImageBuffer(videoSample);
+    CVImageBufferRef camPx   = CMSampleBufferGetImageBuffer(self.lastCamBuffer);
 
-    // Orijinal kamera buffer'ının format+timing'iyle yeniden paketle
-    CMSampleBufferRef repacked = CIRepackBuffer(px, self.lastCamBuffer);
-    CFRelease(videoSample);
+    if (videoPx && camPx) {
+        // Video piksellerini kamera buffer'ına yaz
+        CICopyBGRAtoYUV(videoPx, camPx);
 
-    if (repacked) {
+        // Aynı kamera buffer'ını (içeriği değişmiş) delegate'e gönder
+        // SDK için bu gerçek kamera frame'i — timing, format, connection hepsi aynı
         if ([self.realDelegate respondsToSelector:
              @selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
             [self.realDelegate captureOutput:self.capOut
-                       didOutputSampleBuffer:repacked
+                       didOutputSampleBuffer:self.lastCamBuffer
                               fromConnection:self.conn];
         }
-        CFRelease(repacked);
     }
-
+    CFRelease(videoSample);
     [self scheduleNext];
 }
 
