@@ -1,5 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
+#import <CoreMedia/CoreMedia.h>
+#import <CoreVideo/CoreVideo.h>
 #import <objc/runtime.h>
 
 // ─────────────────────────────────────────────
@@ -9,15 +11,48 @@ static id  _injector        = nil;
 static id  _proxy           = nil;
 static id  _pickerDelegate  = nil;
 
-// ─────────────────────────────────────────────
-//  Bubble window forward
-// ─────────────────────────────────────────────
 @interface CIBubbleWindow : UIWindow
 @property (nonatomic, strong) UIButton *bubbleBtn;
 + (instancetype)shared;
 - (void)setInjecting:(BOOL)on;
 - (void)log:(NSString *)msg;
 @end
+
+// ─────────────────────────────────────────────
+//  CMSampleBuffer yeniden paketle
+//  Orijinal buffer'ın format + timing'ini al,
+//  sadece pixel data'yı videomuzdan koy
+// ─────────────────────────────────────────────
+static CMSampleBufferRef CIRepackBuffer(CVPixelBufferRef srcPx,
+                                        CMSampleBufferRef refBuf) {
+    // 1. Orijinal format description'ı al (renk uzayı, boyut vs)
+    CMFormatDescriptionRef refFmt = CMSampleBufferGetFormatDescription(refBuf);
+
+    // Video boyutları eşleşmiyorsa scale et — ama format desc orijinalden gelsin
+    CMFormatDescriptionRef newFmt = NULL;
+    CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, srcPx, &newFmt);
+
+    // 2. Orijinal timing'i kullan (PTS, duration)
+    CMSampleTimingInfo timing;
+    CMSampleBufferGetSampleTimingInfo(refBuf, 0, &timing);
+    // Şimdiki zamanı kullan — SDK eski timestamp reddedebilir
+    timing.presentationTimeStamp = CMClockGetTime(CMClockGetHostTimeClock());
+    timing.decodeTimeStamp        = kCMTimeInvalid;
+
+    CMSampleBufferRef newBuf = NULL;
+    CMSampleBufferCreateForImageBuffer(
+        kCFAllocatorDefault,
+        srcPx,
+        true,           // dataReady
+        NULL, NULL,     // makeDataReadyCallback
+        newFmt ?: refFmt,
+        &timing,
+        &newBuf
+    );
+
+    if (newFmt) CFRelease(newFmt);
+    return newBuf; // caller CFRelease sorumlu
+}
 
 // ─────────────────────────────────────────────
 //  CIFrameInjector
@@ -27,14 +62,16 @@ static id  _pickerDelegate  = nil;
 @property (nonatomic, strong) AVAssetReader            *reader;
 @property (nonatomic, strong) AVAssetReaderTrackOutput *trackOut;
 @property (nonatomic, strong) dispatch_queue_t          q;
-// strong tutuyoruz — weak olunca nil'e düşüyordu
 @property (nonatomic, strong) id<AVCaptureVideoDataOutputSampleBufferDelegate> realDelegate;
 @property (nonatomic, strong) AVCaptureOutput          *capOut;
 @property (nonatomic, strong) AVCaptureConnection      *conn;
+// Son kamera buffer'ı — format/timing referansı için
+@property (nonatomic, assign) CMSampleBufferRef         lastCamBuffer;
 @property (nonatomic, assign) BOOL                      running;
 @property (nonatomic, assign) int64_t                   frameNs;
 - (void)startWithURL:(NSURL *)url;
 - (void)stop;
+- (void)updateCamBuffer:(CMSampleBufferRef)buf;
 @end
 
 @implementation CIFrameInjector
@@ -46,13 +83,19 @@ static id  _pickerDelegate  = nil;
     return self;
 }
 
+- (void)updateCamBuffer:(CMSampleBufferRef)buf {
+    CMSampleBufferRef old = self.lastCamBuffer;
+    if (buf) CFRetain(buf);
+    self.lastCamBuffer = buf;
+    if (old) CFRelease(old);
+}
+
 - (BOOL)openReader {
     [self.reader cancelReading];
     self.reader = nil; self.trackOut = nil;
 
     AVAssetTrack *track = [self.asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
     if (!track) return NO;
-
     float fps = track.nominalFrameRate;
     if (fps > 1 && fps < 120) self.frameNs = (int64_t)(NSEC_PER_SEC / fps);
 
@@ -60,9 +103,23 @@ static id  _pickerDelegate  = nil;
     self.reader = [AVAssetReader assetReaderWithAsset:self.asset error:&err];
     if (!self.reader) return NO;
 
+    // Boyutu kamera buffer'ından al
+    CGSize targetSize = CGSizeMake(1280, 720); // fallback
+    if (self.lastCamBuffer) {
+        CVImageBufferRef camPx = CMSampleBufferGetImageBuffer(self.lastCamBuffer);
+        if (camPx) {
+            targetSize = CGSizeMake(CVPixelBufferGetWidth(camPx),
+                                    CVPixelBufferGetHeight(camPx));
+        }
+    }
+
     self.trackOut = [AVAssetReaderTrackOutput
         assetReaderTrackOutputWithTrack:track
-        outputSettings:@{(id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)}];
+        outputSettings:@{
+            (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+            (id)kCVPixelBufferWidthKey:  @(targetSize.width),
+            (id)kCVPixelBufferHeightKey: @(targetSize.height),
+        }];
     [self.reader addOutput:self.trackOut];
     return [self.reader startReading];
 }
@@ -74,7 +131,8 @@ static id  _pickerDelegate  = nil;
         [[CIBubbleWindow shared] log:@"❌ Reader açılamadı"]; return;
     }
     self.running = YES;
-    [[CIBubbleWindow shared] log:[NSString stringWithFormat:@"▶ injection başladı (%.0ffps)", (double)NSEC_PER_SEC/self.frameNs]];
+    [[CIBubbleWindow shared] log:[NSString stringWithFormat:
+        @"▶ injection başladı\n%.0f FPS", (double)NSEC_PER_SEC/self.frameNs]];
     [self scheduleNext];
 }
 
@@ -89,29 +147,38 @@ static id  _pickerDelegate  = nil;
 - (void)sendFrame {
     if (!self.running) return;
 
-    // capOut/conn henüz yok — bekle
-    if (!self.capOut || !self.conn || !self.realDelegate) {
-        [[CIBubbleWindow shared] log:@"⏳ capOut/conn bekleniyor..."];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC/10), self.q, ^{
+    if (!self.capOut || !self.conn || !self.realDelegate || !self.lastCamBuffer) {
+        // Henüz hazır değil — kısa bekle
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC/20), self.q, ^{
             [self sendFrame];
         });
         return;
     }
 
-    CMSampleBufferRef sample = [self.trackOut copyNextSampleBuffer];
-    if (!sample) {
+    CMSampleBufferRef videoSample = [self.trackOut copyNextSampleBuffer];
+    if (!videoSample) {
         [self openReader];
         [self scheduleNext];
         return;
     }
 
-    if ([self.realDelegate respondsToSelector:
-         @selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
-        [self.realDelegate captureOutput:self.capOut
-                   didOutputSampleBuffer:sample
-                          fromConnection:self.conn];
+    // Pixel buffer'ı al
+    CVImageBufferRef px = CMSampleBufferGetImageBuffer(videoSample);
+
+    // Orijinal kamera buffer'ının format+timing'iyle yeniden paketle
+    CMSampleBufferRef repacked = CIRepackBuffer(px, self.lastCamBuffer);
+    CFRelease(videoSample);
+
+    if (repacked) {
+        if ([self.realDelegate respondsToSelector:
+             @selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
+            [self.realDelegate captureOutput:self.capOut
+                       didOutputSampleBuffer:repacked
+                              fromConnection:self.conn];
+        }
+        CFRelease(repacked);
     }
-    CFRelease(sample);
+
     [self scheduleNext];
 }
 
@@ -120,12 +187,19 @@ static id  _pickerDelegate  = nil;
     [self.reader cancelReading];
     self.reader = nil; self.trackOut = nil;
     self.capOut = nil; self.conn = nil;
+    [self updateCamBuffer:NULL];
+}
+
+- (void)dealloc {
+    if (_lastCamBuffer) CFRelease(_lastCamBuffer);
 }
 
 @end
 
 // ─────────────────────────────────────────────
 //  Proxy delegate
+//  — kamera frame gelince lastCamBuffer güncelle
+//  — injector çalışıyorsa frame'i yut
 // ─────────────────────────────────────────────
 @interface CIProxyDelegate : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
 @property (nonatomic, strong) id<AVCaptureVideoDataOutputSampleBufferDelegate> real;
@@ -136,14 +210,12 @@ static id  _pickerDelegate  = nil;
 didOutputSampleBuffer:(CMSampleBufferRef)b
        fromConnection:(AVCaptureConnection *)c {
     CIFrameInjector *inj = (CIFrameInjector *)_injector;
-
-    // capOut/conn'u her zaman güncelle
     inj.capOut = o;
     inj.conn   = c;
+    [inj updateCamBuffer:b]; // her zaman güncelle — format referansı için
 
-    if (inj.running) {
-        return; // kamera frame'ini yut
-    }
+    if (inj.running) return; // kamera frame'ini yut
+
     if ([self.real respondsToSelector:_cmd])
         [self.real captureOutput:o didOutputSampleBuffer:b fromConnection:c];
 }
@@ -167,7 +239,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)b
 - (void)ci_setSBD:(id<AVCaptureVideoDataOutputSampleBufferDelegate>)del
             queue:(dispatch_queue_t)q {
     if (del && ![del isKindOfClass:[CIProxyDelegate class]]) {
-        [[CIBubbleWindow shared] log:[NSString stringWithFormat:@"🔗 delegate: %@", NSStringFromClass([del class])]];
+        [[CIBubbleWindow shared] log:[NSString stringWithFormat:
+            @"🔗 %@", NSStringFromClass([del class])]];
         CIProxyDelegate *p = (CIProxyDelegate *)_proxy;
         p.real = del;
         ((CIFrameInjector *)_injector).realDelegate = del;
@@ -187,41 +260,29 @@ didOutputSampleBuffer:(CMSampleBufferRef)b
 @end
 
 // ─────────────────────────────────────────────
-//  AVCaptureSession hook — startRunning'i yakala
-//  ve o anda output/connection'ı al
+//  AVCaptureSession hook
 // ─────────────────────────────────────────────
 @interface AVCaptureSession (CI) @end
 @implementation AVCaptureSession (CI)
 - (void)ci_startRunning {
     [self ci_startRunning];
-
     CIFrameInjector *inj = (CIFrameInjector *)_injector;
     if (!inj) return;
-
-    // Session'daki ilk VideoDataOutput'u bul
     for (AVCaptureOutput *out in self.outputs) {
-        if ([out isKindOfClass:[AVCaptureVideoDataOutput class]]) {
-            AVCaptureVideoDataOutput *vdo = (AVCaptureVideoDataOutput *)out;
-            // Connection'ı al
-            AVCaptureConnection *conn = [vdo connectionWithMediaType:AVMediaTypeVideo];
-            if (conn) {
-                inj.capOut = out;
-                inj.conn   = conn;
-                [[CIBubbleWindow shared] log:[NSString stringWithFormat:
-                    @"✅ startRunning — capOut/conn hazır\ndelegate: %@",
-                    NSStringFromClass([vdo.sampleBufferDelegate class])]];
-            }
-            // realDelegate'i de güncelle
-            id del = vdo.sampleBufferDelegate;
-            if (del && ![del isKindOfClass:[CIProxyDelegate class]]) {
-                CIProxyDelegate *p = (CIProxyDelegate *)_proxy;
-                p.real = del;
-                inj.realDelegate = del;
-            } else if ([del isKindOfClass:[CIProxyDelegate class]]) {
-                inj.realDelegate = ((CIProxyDelegate *)del).real;
-            }
-            break;
+        if (![out isKindOfClass:[AVCaptureVideoDataOutput class]]) continue;
+        AVCaptureVideoDataOutput *vdo = (AVCaptureVideoDataOutput *)out;
+        AVCaptureConnection *conn = [vdo connectionWithMediaType:AVMediaTypeVideo];
+        if (conn) { inj.capOut = out; inj.conn = conn; }
+        id del = vdo.sampleBufferDelegate;
+        if (del && ![del isKindOfClass:[CIProxyDelegate class]]) {
+            ((CIProxyDelegate *)_proxy).real = del;
+            inj.realDelegate = del;
+        } else if ([del isKindOfClass:[CIProxyDelegate class]]) {
+            inj.realDelegate = ((CIProxyDelegate *)del).real;
         }
+        [[CIBubbleWindow shared] log:[NSString stringWithFormat:
+            @"✅ startRunning\ndelegate: %@", NSStringFromClass([inj.realDelegate class])]];
+        break;
     }
 }
 + (void)load {
@@ -338,10 +399,8 @@ static CIPanTarget *_panTarget = nil;
     self.rootViewController.view.backgroundColor = [UIColor clearColor];
 
     CGSize sz = [UIScreen mainScreen].bounds.size;
-
-    // Balon
     self.bubbleBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    self.bubbleBtn.frame = CGRectMake(sz.width - 70, 90, 56, 56);
+    self.bubbleBtn.frame = CGRectMake(sz.width-70, 90, 56, 56);
     self.bubbleBtn.backgroundColor     = [UIColor colorWithRed:.08 green:.08 blue:.1 alpha:.92];
     self.bubbleBtn.layer.cornerRadius  = 28;
     self.bubbleBtn.layer.borderWidth   = 1.5;
@@ -362,51 +421,44 @@ static CIPanTarget *_panTarget = nil;
     pan.delaysTouchesEnded = NO;
     [self.bubbleBtn addGestureRecognizer:pan];
 
-    // Küçük log etiketi (balonun altında)
-    _logLabel = [[UILabel alloc] initWithFrame:CGRectMake(sz.width-180, 150, 170, 60)];
+    _logLabel = [[UILabel alloc] initWithFrame:CGRectMake(sz.width-185, 150, 175, 60)];
     _logLabel.numberOfLines   = 3;
     _logLabel.font            = [UIFont systemFontOfSize:9];
     _logLabel.textColor       = [UIColor colorWithRed:.2 green:1 blue:.4 alpha:1];
     _logLabel.backgroundColor = [UIColor colorWithWhite:0 alpha:.65];
-    _logLabel.layer.cornerRadius = 6;
+    _logLabel.layer.cornerRadius  = 6;
     _logLabel.layer.masksToBounds = YES;
-    _logLabel.textAlignment   = NSTextAlignmentLeft;
-    _logLabel.text            = @"";
 
     [self.rootViewController.view addSubview:self.bubbleBtn];
     [self.rootViewController.view addSubview:_logLabel];
-    [self makeKeyAndVisible];
+    // makeKeyAndVisible YOK — key window'u çalmıyoruz
+    self.hidden = NO;
 
+    // Sadece kendi window'umuzu öne al, key window'u çalma
     [[NSNotificationCenter defaultCenter]
         addObserver:self selector:@selector(bringToFront)
         name:UIWindowDidBecomeVisibleNotification object:nil];
-
     return self;
 }
 
 - (void)log:(NSString *)msg {
     NSLog(@"[CI] %@", msg);
-    dispatch_async(dispatch_get_main_queue(), ^{
-        _logLabel.text = msg;
-    });
+    dispatch_async(dispatch_get_main_queue(), ^{ _logLabel.text = msg; });
 }
 
 - (void)bringToFront {
+    // makeKeyAndVisible çağırmıyoruz — klavye/popup window'larını ezmez
+    // Sadece hidden değilse zaten görünür; windowLevel zaten yüksek
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self makeKeyAndVisible];
-        for (UIWindow *w in [UIApplication sharedApplication].windows)
-            if (w != self) { [w makeKeyWindow]; break; }
+        if (self.isHidden) self.hidden = NO;
     });
 }
 
 - (void)tapped {
     CIFrameInjector *inj = (CIFrameInjector *)_injector;
-    if (inj.running) {
-        [inj stop]; [self setInjecting:NO]; return;
-    }
+    if (inj.running) { [inj stop]; [self setInjecting:NO]; return; }
     UIViewController *vc = CITopVC();
-    if (!vc) { [self log:@"❌ VC bulunamadı"]; return; }
-
+    if (!vc) { [self log:@"❌ VC yok"]; return; }
     UIImagePickerController *picker = [UIImagePickerController new];
     picker.sourceType   = UIImagePickerControllerSourceTypePhotoLibrary;
     picker.mediaTypes   = @[@"public.movie"];
@@ -431,12 +483,10 @@ static CIPanTarget *_panTarget = nil;
 - (UIView *)hitTest:(CGPoint)p withEvent:(UIEvent *)e {
     for (UIView *sub in self.rootViewController.view.subviews) {
         CGPoint lp = [sub convertPoint:p fromView:self];
-        if (!sub.hidden && CGRectContainsPoint(sub.bounds, lp))
-            return sub;
+        if (!sub.hidden && CGRectContainsPoint(sub.bounds, lp)) return sub;
     }
     return nil;
 }
-
 @end
 
 // ─────────────────────────────────────────────
