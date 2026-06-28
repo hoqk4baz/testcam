@@ -18,6 +18,11 @@ static id  _pickerDelegate  = nil;
 - (void)log:(NSString *)msg;
 @end
 
+// CFDictionaryApplyFunction için C function (block kullanılamaz)
+static void CICopyDictEntry(const void *key, const void *value, void *ctx) {
+    CFDictionarySetValue((CFMutableDictionaryRef)ctx, key, value);
+}
+
 // ─────────────────────────────────────────────
 //  CMSampleBuffer yeniden paketle
 //  Kamera buffer'ının TÜM attachment'larını kopyala
@@ -47,43 +52,34 @@ static CMSampleBufferRef CIRepackBuffer(CVPixelBufferRef srcPx,
     if (newFmt) CFRelease(newFmt);
     if (!newBuf) return NULL;
 
-    // Kamera buffer'ının attachment'larını kopyala
-    // (kCMSampleBufferAttachmentKey_DisplayImmediately, orientation, vb.)
+    // CMSampleBuffer attachment'larını kopyala
     CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(refBuf, false);
     if (attachments && CFArrayGetCount(attachments) > 0) {
         CFDictionaryRef srcDict = (CFDictionaryRef)CFArrayGetValueAtIndex(attachments, 0);
         CFArrayRef dstArr = CMSampleBufferGetSampleAttachmentsArray(newBuf, true);
         if (dstArr && CFArrayGetCount(dstArr) > 0) {
             CFMutableDictionaryRef dstDict = (CFMutableDictionaryRef)CFArrayGetValueAtIndex(dstArr, 0);
-            CFDictionaryApplyFunction(srcDict, ^(const void *k, const void *v, void *ctx){
-                CFMutableDictionaryRef d = (CFMutableDictionaryRef)ctx;
-                CFDictionarySetValue(d, k, v);
-            }, dstDict);
+            CFDictionaryApplyFunction(srcDict, CICopyDictEntry, dstDict);
         }
     }
 
-    // CVImageBuffer attachment'larını da kopyala (renk uzayı, orientation)
+    // CVImageBuffer attachment'larını kopyala — CVBufferGetAttachment iOS 14 uyumlu
     CVImageBufferRef refPx = CMSampleBufferGetImageBuffer(refBuf);
     if (refPx) {
-        // Orientation
-        CFTypeRef orient = CVBufferCopyAttachment(refPx, kCVImageBufferFieldDetailKey, NULL);
-        if (orient) { CVBufferSetAttachment(srcPx, kCVImageBufferFieldDetailKey, orient, kCVAttachmentMode_ShouldPropagate); CFRelease(orient); }
-
-        // Color space
-        CFTypeRef cs = CVBufferCopyAttachment(refPx, kCVImageBufferCGColorSpaceKey, NULL);
-        if (cs) { CVBufferSetAttachment(srcPx, kCVImageBufferCGColorSpaceKey, cs, kCVAttachmentMode_ShouldPropagate); CFRelease(cs); }
-
-        // YCbCr matrix
-        CFTypeRef ycbcr = CVBufferCopyAttachment(refPx, kCVImageBufferYCbCrMatrixKey, NULL);
-        if (ycbcr) { CVBufferSetAttachment(srcPx, kCVImageBufferYCbCrMatrixKey, ycbcr, kCVAttachmentMode_ShouldPropagate); CFRelease(ycbcr); }
-
-        // Color primaries
-        CFTypeRef cp = CVBufferCopyAttachment(refPx, kCVImageBufferColorPrimariesKey, NULL);
-        if (cp) { CVBufferSetAttachment(srcPx, kCVImageBufferColorPrimariesKey, cp, kCVAttachmentMode_ShouldPropagate); CFRelease(cp); }
-
-        // Transfer function
-        CFTypeRef tf = CVBufferCopyAttachment(refPx, kCVImageBufferTransferFunctionKey, NULL);
-        if (tf) { CVBufferSetAttachment(srcPx, kCVImageBufferTransferFunctionKey, tf, kCVAttachmentMode_ShouldPropagate); CFRelease(tf); }
+        CFStringRef keys[] = {
+            kCVImageBufferYCbCrMatrixKey,
+            kCVImageBufferColorPrimariesKey,
+            kCVImageBufferTransferFunctionKey,
+            kCVImageBufferFieldDetailKey,
+        };
+        for (int i = 0; i < 4; i++) {
+            CVAttachmentMode mode = 0;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            CFTypeRef val = CVBufferGetAttachment(refPx, keys[i], &mode);
+#pragma clang diagnostic pop
+            if (val) CVBufferSetAttachment(srcPx, keys[i], val, mode);
+        }
     }
 
     return newBuf;
