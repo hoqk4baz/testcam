@@ -24,7 +24,7 @@ jobs:
           $CC \
             -arch arm64 \
             -isysroot $SDK \
-            -miphoneos-version-min=14.0 \
+            -miphoneos-version-min=15.0 \
             -fmodules \
             -fobjc-arc \
             -O0 \
