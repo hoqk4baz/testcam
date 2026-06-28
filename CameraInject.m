@@ -20,38 +20,73 @@ static id  _pickerDelegate  = nil;
 
 // ─────────────────────────────────────────────
 //  CMSampleBuffer yeniden paketle
-//  Orijinal buffer'ın format + timing'ini al,
-//  sadece pixel data'yı videomuzdan koy
+//  Kamera buffer'ının TÜM attachment'larını kopyala
+//  (orientation, color space, vs.) — sadece pixel data değiştir
 // ─────────────────────────────────────────────
 static CMSampleBufferRef CIRepackBuffer(CVPixelBufferRef srcPx,
                                         CMSampleBufferRef refBuf) {
-    // 1. Orijinal format description'ı al (renk uzayı, boyut vs)
-    CMFormatDescriptionRef refFmt = CMSampleBufferGetFormatDescription(refBuf);
-
-    // Video boyutları eşleşmiyorsa scale et — ama format desc orijinalden gelsin
     CMFormatDescriptionRef newFmt = NULL;
     CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, srcPx, &newFmt);
 
-    // 2. Orijinal timing'i kullan (PTS, duration)
     CMSampleTimingInfo timing;
     CMSampleBufferGetSampleTimingInfo(refBuf, 0, &timing);
-    // Şimdiki zamanı kullan — SDK eski timestamp reddedebilir
     timing.presentationTimeStamp = CMClockGetTime(CMClockGetHostTimeClock());
-    timing.decodeTimeStamp        = kCMTimeInvalid;
+    timing.decodeTimeStamp       = kCMTimeInvalid;
+    timing.duration              = kCMTimeInvalid;
 
     CMSampleBufferRef newBuf = NULL;
     CMSampleBufferCreateForImageBuffer(
         kCFAllocatorDefault,
         srcPx,
-        true,           // dataReady
-        NULL, NULL,     // makeDataReadyCallback
-        newFmt ?: refFmt,
+        true,
+        NULL, NULL,
+        newFmt,
         &timing,
         &newBuf
     );
-
     if (newFmt) CFRelease(newFmt);
-    return newBuf; // caller CFRelease sorumlu
+    if (!newBuf) return NULL;
+
+    // Kamera buffer'ının attachment'larını kopyala
+    // (kCMSampleBufferAttachmentKey_DisplayImmediately, orientation, vb.)
+    CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(refBuf, false);
+    if (attachments && CFArrayGetCount(attachments) > 0) {
+        CFDictionaryRef srcDict = (CFDictionaryRef)CFArrayGetValueAtIndex(attachments, 0);
+        CFArrayRef dstArr = CMSampleBufferGetSampleAttachmentsArray(newBuf, true);
+        if (dstArr && CFArrayGetCount(dstArr) > 0) {
+            CFMutableDictionaryRef dstDict = (CFMutableDictionaryRef)CFArrayGetValueAtIndex(dstArr, 0);
+            CFDictionaryApplyFunction(srcDict, ^(const void *k, const void *v, void *ctx){
+                CFMutableDictionaryRef d = (CFMutableDictionaryRef)ctx;
+                CFDictionarySetValue(d, k, v);
+            }, dstDict);
+        }
+    }
+
+    // CVImageBuffer attachment'larını da kopyala (renk uzayı, orientation)
+    CVImageBufferRef refPx = CMSampleBufferGetImageBuffer(refBuf);
+    if (refPx) {
+        // Orientation
+        CFTypeRef orient = CVBufferCopyAttachment(refPx, kCVImageBufferFieldDetailKey, NULL);
+        if (orient) { CVBufferSetAttachment(srcPx, kCVImageBufferFieldDetailKey, orient, kCVAttachmentMode_ShouldPropagate); CFRelease(orient); }
+
+        // Color space
+        CFTypeRef cs = CVBufferCopyAttachment(refPx, kCVImageBufferCGColorSpaceKey, NULL);
+        if (cs) { CVBufferSetAttachment(srcPx, kCVImageBufferCGColorSpaceKey, cs, kCVAttachmentMode_ShouldPropagate); CFRelease(cs); }
+
+        // YCbCr matrix
+        CFTypeRef ycbcr = CVBufferCopyAttachment(refPx, kCVImageBufferYCbCrMatrixKey, NULL);
+        if (ycbcr) { CVBufferSetAttachment(srcPx, kCVImageBufferYCbCrMatrixKey, ycbcr, kCVAttachmentMode_ShouldPropagate); CFRelease(ycbcr); }
+
+        // Color primaries
+        CFTypeRef cp = CVBufferCopyAttachment(refPx, kCVImageBufferColorPrimariesKey, NULL);
+        if (cp) { CVBufferSetAttachment(srcPx, kCVImageBufferColorPrimariesKey, cp, kCVAttachmentMode_ShouldPropagate); CFRelease(cp); }
+
+        // Transfer function
+        CFTypeRef tf = CVBufferCopyAttachment(refPx, kCVImageBufferTransferFunctionKey, NULL);
+        if (tf) { CVBufferSetAttachment(srcPx, kCVImageBufferTransferFunctionKey, tf, kCVAttachmentMode_ShouldPropagate); CFRelease(tf); }
+    }
+
+    return newBuf;
 }
 
 // ─────────────────────────────────────────────
