@@ -33,6 +33,8 @@ jobs:
             -framework AVFoundation \
             -framework CoreMedia \
             -framework CoreVideo \
+            -framework CoreImage \
+            -framework Security \
             -framework Photos \
             -lobjc \
             -o CameraInject.dylib \
