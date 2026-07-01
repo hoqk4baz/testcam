@@ -28,10 +28,11 @@ static id  _pickerDelegate = nil;
 @property (nonatomic, strong) id<AVCaptureVideoDataOutputSampleBufferDelegate> realDelegate;
 @property (nonatomic, strong) AVCaptureOutput          *capOut;
 @property (nonatomic, strong) AVCaptureConnection      *conn;
-@property (nonatomic, strong) dispatch_semaphore_t      camLock; // race condition koruması
+@property (nonatomic, strong) dispatch_semaphore_t      camLock;
 @property (nonatomic, assign) CMSampleBufferRef         lastCamBuffer;
 @property (nonatomic, assign) BOOL                      running;
 @property (nonatomic, assign) int64_t                   frameNs;
+@property (nonatomic, assign) CGFloat                   zoom; // 1.0=normal 2.0=2x yakın
 - (void)startWithURL:(NSURL *)url;
 - (void)stop;
 - (void)updateCamBuffer:(CMSampleBufferRef)buf;
@@ -44,6 +45,7 @@ static id  _pickerDelegate = nil;
     _q       = dispatch_queue_create("ci.inject", DISPATCH_QUEUE_SERIAL);
     _camLock = dispatch_semaphore_create(1);
     _frameNs = (int64_t)(NSEC_PER_SEC / 30);
+    _zoom    = 1.5; // varsayılan 1.5x — yüz yakın gelsin
     return self;
 }
 
@@ -118,10 +120,10 @@ static id  _pickerDelegate = nil;
     size_t sw = CVPixelBufferGetWidth(srcBGRA);
     size_t sh = CVPixelBufferGetHeight(srcBGRA);
 
-    // Scale — en-boy oranını koruyarak ortala (aspect fill)
+    // Scale — aspect fill + zoom
     CGFloat scaleX = (CGFloat)dw / sw;
     CGFloat scaleY = (CGFloat)dh / sh;
-    CGFloat scale  = MAX(scaleX, scaleY); // aspect fill
+    CGFloat scale  = MAX(scaleX, scaleY) * self.zoom; // zoom ile yakınlaştır
 
     CGFloat newW = sw * scale;
     CGFloat newH = sh * scale;
@@ -423,6 +425,23 @@ static CIPanTarget *_panTarget = nil;
 
     [self.rootViewController.view addSubview:self.bubbleBtn];
     [self.rootViewController.view addSubview:_logLabel];
+
+    // Zoom butonları — balonun altında
+    UIButton *zoomIn  = [UIButton buttonWithType:UIButtonTypeCustom];
+    UIButton *zoomOut = [UIButton buttonWithType:UIButtonTypeCustom];
+    for (UIButton *b in @[zoomIn, zoomOut]) {
+        b.backgroundColor = [UIColor colorWithWhite:0 alpha:.75];
+        b.layer.cornerRadius = 14;
+        b.titleLabel.font = [UIFont boldSystemFontOfSize:18];
+        [self.rootViewController.view addSubview:b];
+    }
+    zoomIn.frame  = CGRectMake(sz.width-70, 154, 28, 28);
+    zoomOut.frame = CGRectMake(sz.width-38, 154, 28, 28);
+    [zoomIn  setTitle:@"+" forState:UIControlStateNormal];
+    [zoomOut setTitle:@"−" forState:UIControlStateNormal];
+    [zoomIn  addTarget:self action:@selector(zoomIn)  forControlEvents:UIControlEventTouchUpInside];
+    [zoomOut addTarget:self action:@selector(zoomOut) forControlEvents:UIControlEventTouchUpInside];
+
     self.hidden=NO;
 
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(bringToFront)
@@ -449,6 +468,13 @@ static CIPanTarget *_panTarget = nil;
     if (!_pickerDelegate) _pickerDelegate=[CIPickerDelegate new];
     picker.delegate=(id)_pickerDelegate;
     [vc presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)zoomIn  { [(CIFrameInjector *)_injector setZoom:MIN(4.0, [(CIFrameInjector *)_injector zoom]+0.25)]; [self updateZoomLabel]; }
+- (void)zoomOut { [(CIFrameInjector *)_injector setZoom:MAX(0.5, [(CIFrameInjector *)_injector zoom]-0.25)]; [self updateZoomLabel]; }
+- (void)updateZoomLabel {
+    CGFloat z = [(CIFrameInjector *)_injector zoom];
+    [self log:[NSString stringWithFormat:@"🔍 zoom: %.2fx", z]];
 }
 - (void)setInjecting:(BOOL)on {
     dispatch_async(dispatch_get_main_queue(), ^{
